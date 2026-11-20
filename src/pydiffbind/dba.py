@@ -1,0 +1,170 @@
+"""Main user-facing class."""
+from __future__ import annotations
+
+import os
+from typing import List, Optional, Union
+
+import pandas as pd
+
+from . import analyze, count as _count, normalize as _norm, peaks as _peaks, plots, samplesheet
+
+
+class DBA:
+    """Differential binding analysis object (analogous to a DiffBind DBA object).
+
+    Example
+    -------
+    >>> dba = DBA("samples.csv")
+    >>> dba.count(summits=250, min_overlap=2, threads=4)
+    >>> dba.normalize("rle")
+    >>> dba.analyze("Condition", "treated", "control")
+    >>> sites = dba.report(fdr=0.05)
+    """
+
+    def __init__(self, sheet: Union[str, pd.DataFrame], check_files: bool = True):
+        self.sheet = samplesheet.load_samplesheet(sheet, check_files=check_files)
+        self.meta = self.sheet.set_index("SampleID")
+        self.peaksets: Optional[List[pd.DataFrame]] = None
+        self.consensus: Optional[pd.DataFrame] = None
+        self.counts: Optional[pd.DataFrame] = None
+        self.libs: Optional[pd.Series] = None
+        self.bin_counts: Optional[pd.DataFrame] = None
+        self.size_factors: Optional[pd.Series] = None
+        self.norm_method: Optional[str] = None
+        self.results: Optional[pd.DataFrame] = None
+        self.contrast: Optional[tuple] = None
+        self._covariates: List[str] = []
+
+    def __repr__(self) -> str:
+        s = f"DBA: {len(self.sheet)} samples"
+        if self.consensus is not None:
+            s += f", {len(self.consensus)} consensus sites"
+        if self.size_factors is not None:
+            s += f", normalized ({self.norm_method})"
+        if self.results is not None:
+            s += f", contrast {self.contrast}"
+        return s
+
+    # ------------------------------------------------------------------ peaks
+    def load_peaks(self) -> None:
+        self.peaksets = [_peaks.read_peaks(r.Peaks, r.PeakFormat) for r in self.sheet.itertuples()]
+
+    def build_consensus(self, min_overlap: int = 2, summits: Optional[int] = 200,
+                        blacklist: Optional[str] = None) -> pd.DataFrame:
+        if self.peaksets is None:
+            self.load_peaks()
+        self.consensus = _peaks.build_consensus(self.peaksets, min_overlap=min_overlap, summits=summits)
+        if blacklist:
+            self.consensus = _peaks.filter_blacklist(self.consensus, blacklist)
+        return self.consensus
+
+    # ------------------------------------------------------------------ count
+    def count(self, summits: Optional[int] = 200, min_overlap: int = 2, min_mapq: int = 10,
+              fragment_size: int = 200, remove_dups: bool = True, blacklist: Optional[str] = None,
+              subtract_control: bool = False, background: bool = False, bin_size: int = 15000,
+              threads: int = 1) -> pd.DataFrame:
+        """Build the consensus peakset and count reads in it for every sample.
+
+        background=True additionally counts reads in genome-wide bins, which enables
+        ``normalize('background')``. subtract_control=True uses the ``bamControl`` column.
+        """
+        self.build_consensus(min_overlap=min_overlap, summits=summits, blacklist=blacklist)
+        if self.consensus.empty:
+            raise ValueError("Consensus peakset is empty; lower min_overlap or check peak files.")
+        kw = dict(min_mapq=min_mapq, fragment_size=fragment_size, remove_dups=remove_dups, threads=threads)
+        bams = dict(zip(self.sheet["SampleID"], self.sheet["bamReads"]))
+        self.counts, self.libs = _count.count_bam_set(bams, self.consensus, **kw)
+
+        if subtract_control:
+            ctrl = {s: c for s, c in zip(self.sheet["SampleID"], self.sheet["bamControl"]) if pd.notna(c)}
+            if not ctrl:
+                raise ValueError("subtract_control=True but no 'bamControl' values in the sample sheet.")
+            uniq = {os.path.basename(p): p for p in ctrl.values()}
+            cc, cl = _count.count_bam_set(uniq, self.consensus, **kw)
+            self.counts = _count.subtract_control(
+                self.counts, self.libs, cc, cl, {s: os.path.basename(c) for s, c in ctrl.items()})
+
+        if background:
+            bins = _count.genome_bins(self.sheet["bamReads"].iloc[0], bin_size)
+            self.bin_counts, _ = _count.count_bam_set(bams, bins, **kw)
+        self.size_factors = None
+        self.results = None
+        return self.counts
+
+    # -------------------------------------------------------------- normalize
+    def normalize(self, method: str = "rle") -> pd.Series:
+        """Compute size factors: 'rle' (DESeq2 default), 'lib', 'tmm' or 'background'."""
+        self._require_counts()
+        self.size_factors = _norm.compute_size_factors(method, self.counts, self.libs, self.bin_counts)
+        self.norm_method = method
+        return self.size_factors
+
+    @property
+    def norm_counts(self) -> pd.DataFrame:
+        self._require_counts()
+        if self.size_factors is None:
+            self.normalize("rle")
+        return self.counts / self.size_factors
+
+    # ---------------------------------------------------------------- analyze
+    def analyze(self, factor: str = "Condition", group1: Optional[str] = None, group2: Optional[str] = None,
+                covariates: Optional[List[str]] = None, n_cpus: int = 1) -> pd.DataFrame:
+        """Differential test group1 vs group2 on a sample-sheet column (log2FC = group1/group2)."""
+        self._require_counts()
+        if factor not in self.meta.columns:
+            raise ValueError(f"Column {factor!r} not in sample sheet.")
+        levels = list(pd.unique(self.meta[factor]))
+        if group1 is None or group2 is None:
+            if len(levels) != 2:
+                raise ValueError(f"{factor} has {len(levels)} levels {levels}; specify group1 and group2.")
+            group1, group2 = levels
+        if self.size_factors is None:
+            self.normalize("rle")
+        self.results = analyze.run_deseq2(
+            self.counts, self.meta, factor, group1, group2, covariates=covariates,
+            size_factors=self.size_factors, n_cpus=n_cpus)
+        self.contrast = (factor, group1, group2)
+        self._covariates = covariates or []
+        return self.results
+
+    def report(self, fdr: float = 0.05, lfc: float = 0.0, direction: Optional[str] = None) -> pd.DataFrame:
+        """Significant sites with coordinates. direction: None, 'up' (group1 higher) or 'down'."""
+        if self.results is None:
+            raise RuntimeError("Run analyze() first.")
+        r = self.results.join(self.consensus.set_index("PeakID")[["Chromosome", "Start", "End"]])
+        r = r[(r["padj"] < fdr) & (r["log2FoldChange"].abs() >= lfc)]
+        if direction == "up":
+            r = r[r["log2FoldChange"] > 0]
+        elif direction == "down":
+            r = r[r["log2FoldChange"] < 0]
+        cols = ["Chromosome", "Start", "End"] + [c for c in r.columns if c not in ("Chromosome", "Start", "End")]
+        return r[cols].sort_values("padj")
+
+    def to_bed(self, path: str, **report_kw) -> None:
+        r = self.report(**report_kw)
+        r[["Chromosome", "Start", "End"]].assign(name=r.index, score=r["log2FoldChange"].round(3)) \
+            .to_csv(path, sep="\t", header=False, index=False)
+
+    # ------------------------------------------------------------------ plots
+    def plot_pca(self, color_by: str = "Condition", ax=None):
+        return plots.plot_pca(self.norm_counts, self.meta, color_by, ax)
+
+    def plot_correlation(self, ax=None):
+        return plots.plot_correlation(self.norm_counts, ax)
+
+    def plot_ma(self, fdr: float = 0.05, ax=None):
+        self._require_results()
+        return plots.plot_ma(self.results, fdr, ax)
+
+    def plot_volcano(self, fdr: float = 0.05, lfc: float = 0.0, ax=None):
+        self._require_results()
+        return plots.plot_volcano(self.results, fdr, lfc, ax)
+
+    # --------------------------------------------------------------- helpers
+    def _require_counts(self):
+        if self.counts is None:
+            raise RuntimeError("Run count() first.")
+
+    def _require_results(self):
+        if self.results is None:
+            raise RuntimeError("Run analyze() first.")

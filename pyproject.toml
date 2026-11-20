@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pydiffbind"
+version = "0.1.0"
+description = "Differential binding analysis of ChIP-seq / ATAC-seq data in Python, inspired by R/Bioconductor DiffBind"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["ChIP-seq", "ATAC-seq", "differential binding", "bioinformatics", "DiffBind"]
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "pysam",
+    "pydeseq2>=0.4",
+    "matplotlib",
+    "scikit-learn",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+pydiffbind = "pydiffbind.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
