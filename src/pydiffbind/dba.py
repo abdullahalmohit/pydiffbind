@@ -152,9 +152,9 @@ class DBA:
     def plot_correlation(self, ax=None):
         return plots.plot_correlation(self.norm_counts, ax)
 
-    def plot_ma(self, fdr: float = 0.05, ax=None):
+    def plot_ma(self, fdr: float = 0.05, lfc: float = 0.0, ax=None):
         self._require_results()
-        return plots.plot_ma(self.results, fdr, ax)
+        return plots.plot_ma(self.results, fdr, lfc, ax)
 
     def plot_volcano(self, fdr: float = 0.05, lfc: float = 0.0, ax=None):
         self._require_results()

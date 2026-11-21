@@ -41,25 +41,36 @@ def plot_correlation(norm_counts: pd.DataFrame, ax=None):
     return ax
 
 
-def plot_ma(res: pd.DataFrame, fdr: float = 0.05, ax=None):
+def _scatter_updown(ax, x, y, up, down, other):
+    """Grey = not significant, red = up (higher in group1), blue = down (lower in group1)."""
+    ax.scatter(x[other], y[other], s=4, c="lightgrey", alpha=.6, label="Not significant", rasterized=True)
+    ax.scatter(x[down], y[down], s=7, c="royalblue", label=f"Down ({down.sum()})", rasterized=True)
+    ax.scatter(x[up], y[up], s=7, c="red", label=f"Up ({up.sum()})", rasterized=True)
+
+
+def plot_ma(res: pd.DataFrame, fdr: float = 0.05, lfc: float = 0.0, ax=None):
     r = res.dropna(subset=["padj"])
-    sig = r["padj"] < fdr
-    ax = ax or plt.subplots(figsize=(5, 4.5))[1]
-    ax.scatter(np.log10(r.loc[~sig, "baseMean"] + 1), r.loc[~sig, "log2FoldChange"], s=4, c="grey", alpha=.5)
-    ax.scatter(np.log10(r.loc[sig, "baseMean"] + 1), r.loc[sig, "log2FoldChange"], s=6, c="crimson")
+    sig = (r["padj"] < fdr) & (r["log2FoldChange"].abs() >= lfc)
+    up, down = sig & (r["log2FoldChange"] > 0), sig & (r["log2FoldChange"] < 0)
+    ax = ax or plt.subplots(figsize=(5.5, 4.5))[1]
+    x = np.log10(r["baseMean"] + 1)
+    _scatter_updown(ax, x, r["log2FoldChange"], up, down, ~sig)
     ax.axhline(0, c="k", lw=.5)
     ax.set_xlabel("log10(mean normalized count + 1)"); ax.set_ylabel("log2 fold change")
-    ax.set_title(f"MA plot ({sig.sum()} sites FDR<{fdr})")
+    ax.set_title(f"MA plot (FDR<{fdr})")
+    ax.legend(markerscale=2, frameon=False, fontsize=8)
     return ax
 
 
 def plot_volcano(res: pd.DataFrame, fdr: float = 0.05, lfc: float = 0.0, ax=None):
     r = res.dropna(subset=["padj"])
     sig = (r["padj"] < fdr) & (r["log2FoldChange"].abs() >= lfc)
-    ax = ax or plt.subplots(figsize=(5, 4.5))[1]
+    up, down = sig & (r["log2FoldChange"] > 0), sig & (r["log2FoldChange"] < 0)
+    ax = ax or plt.subplots(figsize=(5.5, 4.5))[1]
     y = -np.log10(r["pvalue"].clip(lower=1e-300))
-    ax.scatter(r.loc[~sig, "log2FoldChange"], y[~sig], s=4, c="grey", alpha=.5)
-    ax.scatter(r.loc[sig, "log2FoldChange"], y[sig], s=6, c="crimson")
+    _scatter_updown(ax, r["log2FoldChange"], y, up, down, ~sig)
+    ax.axvline(0, c="k", lw=.5)
     ax.set_xlabel("log2 fold change"); ax.set_ylabel("-log10(p)")
-    ax.set_title("Volcano plot")
+    ax.set_title(f"Volcano plot (FDR<{fdr}" + (f", |log2FC|>={lfc})" if lfc else ")"))
+    ax.legend(markerscale=2, frameon=False, fontsize=8)
     return ax
