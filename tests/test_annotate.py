@@ -96,3 +96,12 @@ def test_ncbi_gff3_locus_tag(tmp_path):
     a = Annotation.from_file(str(p), id_attr="locus_tag")
     assert list(a.genes["gene_id"]) == ["AT1G01010"] and len(a.exons) == 1
     assert a.exons["gene_id"].iloc[0] == "AT1G01010"
+
+
+def test_samplesheet_delimiter_autodetect(tmp_path):
+    from pydiffbind.samplesheet import load_samplesheet
+    for name, sep in [("s.csv", ","), ("s_tab.csv", "\t")]:
+        f = tmp_path / name
+        f.write_text(sep.join(["SampleID", "Condition", "bamReads", "Peaks"]) + "\n" +
+                     sep.join(["a", "x", "a.bam", "a.bed"]) + "\n" + sep.join(["b", "y", "b.bam", "b.bed"]) + "\n")
+        assert list(load_samplesheet(str(f), check_files=False)["SampleID"]) == ["a", "b"]
