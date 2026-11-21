@@ -7,6 +7,7 @@ from typing import List, Optional, Union
 import pandas as pd
 
 from . import analyze, count as _count, normalize as _norm, peaks as _peaks, plots, samplesheet
+from .annotate import Annotation
 
 
 class DBA:
@@ -32,6 +33,8 @@ class DBA:
         self.size_factors: Optional[pd.Series] = None
         self.norm_method: Optional[str] = None
         self.results: Optional[pd.DataFrame] = None
+        self.annotation: Optional[pd.DataFrame] = None
+        self._ann: Optional[Annotation] = None
         self.contrast: Optional[tuple] = None
         self._covariates: List[str] = []
 
@@ -41,6 +44,8 @@ class DBA:
             s += f", {len(self.consensus)} consensus sites"
         if self.size_factors is not None:
             s += f", normalized ({self.norm_method})"
+        if self.annotation is not None:
+            s += ", annotated"
         if self.results is not None:
             s += f", contrast {self.contrast}"
         return s
@@ -89,6 +94,7 @@ class DBA:
             self.bin_counts, _ = _count.count_bam_set(bams, bins, **kw)
         self.size_factors = None
         self.results = None
+        self.annotation = None
         return self.counts
 
     # -------------------------------------------------------------- normalize
@@ -131,7 +137,7 @@ class DBA:
         """Significant sites with coordinates. direction: None, 'up' (group1 higher) or 'down'."""
         if self.results is None:
             raise RuntimeError("Run analyze() first.")
-        r = self.results.join(self.consensus.set_index("PeakID")[["Chromosome", "Start", "End"]])
+        r = self.full_results()
         r = r[(r["padj"] < fdr) & (r["log2FoldChange"].abs() >= lfc)]
         if direction == "up":
             r = r[r["log2FoldChange"] > 0]
@@ -144,6 +150,90 @@ class DBA:
         r = self.report(**report_kw)
         r[["Chromosome", "Start", "End"]].assign(name=r.index, score=r["log2FoldChange"].round(3)) \
             .to_csv(path, sep="\t", header=False, index=False)
+
+
+    # ------------------------------------------------------------- annotation
+    def annotate(self, gtf: Union[str, Annotation], promoter=(-2000, 500), downstream: int = 1000,
+                 symbols: Optional[str] = None, biotypes: Optional[List[str]] = None) -> pd.DataFrame:
+        """Annotate all consensus regions using a user-supplied GTF/GFF3 (any species).
+
+        promoter : (upstream, downstream) of the TSS, e.g. (-2000, 500).
+        symbols : optional 2-column file (gene_id, symbol), useful for plants.
+        biotypes : optional filter, e.g. ["protein_coding"].
+        Adds genes, nearest gene, distance to TSS and feature type to ``report()``.
+        """
+        if self.consensus is None:
+            raise RuntimeError("Run count() first.")
+        self._ann = gtf if isinstance(gtf, Annotation) else Annotation.from_file(gtf, symbols, biotypes)
+        self.annotation = self._ann.annotate(self.consensus, promoter=promoter, downstream=downstream)
+        return self.annotation
+
+    def full_results(self) -> pd.DataFrame:
+        """All tested regions: statistics + coordinates (+ annotation if available)."""
+        self._require_results()
+        r = self.results.join(self.consensus.set_index("PeakID")[["Chromosome", "Start", "End"]])
+        if self.annotation is not None:
+            r = r.join(self.annotation)
+        return r
+
+    @staticmethod
+    def _split_genes(values) -> List[str]:
+        out = set()
+        for v in values:
+            if isinstance(v, str) and v:
+                out.update(x for x in v.split(";") if x)
+        return sorted(out)
+
+    def _gene_col(self, by: str, names: bool) -> str:
+        if self.annotation is None:
+            raise RuntimeError("Run annotate(gtf=...) first.")
+        if by not in ("overlap", "nearest"):
+            raise ValueError("by must be 'overlap' or 'nearest'")
+        return {("overlap", False): "overlapping_genes", ("overlap", True): "overlapping_gene_names",
+                ("nearest", False): "nearest_gene", ("nearest", True): "nearest_gene_name"}[(by, bool(names))]
+
+    def gene_lists(self, fdr: float = 0.05, lfc: float = 0.0, by: str = "overlap",
+                   names: bool = False) -> dict:
+        """Gene lists for enrichment: {'up': [...], 'down': [...], 'all': [...]}.
+
+        by='overlap' (default; best for broad marks like H3K27me3) uses every gene whose body or
+        promoter overlaps a differential region; by='nearest' uses the nearest TSS only.
+        names=True returns symbols instead of gene IDs.
+        """
+        col = self._gene_col(by, names)
+        rep = self.report(fdr=fdr, lfc=lfc)
+        up = self._split_genes(rep.loc[rep["log2FoldChange"] > 0, col])
+        down = self._split_genes(rep.loc[rep["log2FoldChange"] < 0, col])
+        return {"up": up, "down": down, "all": sorted(set(up) | set(down))}
+
+    def tested_genes(self, by: str = "overlap", names: bool = False) -> List[str]:
+        """Background gene universe for enrichment (genes touched by any tested region)."""
+        col = self._gene_col(by, names)
+        tested = self.annotation.loc[self.results.index, col]
+        return self._split_genes(tested)
+
+    def save_gene_lists(self, outdir: str, prefix: str = "", **kw) -> None:
+        """Write up/down/background gene lists as one-per-line text files."""
+        os.makedirs(outdir, exist_ok=True)
+        gl = self.gene_lists(**kw)
+        by, names = kw.get("by", "overlap"), kw.get("names", False)
+        for k, fname in [("up", "up_genes.txt"), ("down", "down_genes.txt")]:
+            with open(os.path.join(outdir, prefix + fname), "w") as f:
+                f.write("\n".join(gl[k]) + ("\n" if gl[k] else ""))
+        bg = self.tested_genes(by=by, names=names)
+        with open(os.path.join(outdir, prefix + "background_genes.txt"), "w") as f:
+            f.write("\n".join(bg) + ("\n" if bg else ""))
+
+    def plot_annotation(self, fdr: float = 0.05, lfc: float = 0.0, ax=None):
+        """Genomic feature distribution of gained / lost / all tested regions."""
+        rep = self.report(fdr=fdr, lfc=lfc)
+        return plots.plot_feature_distribution(
+            rep[rep["log2FoldChange"] > 0], rep[rep["log2FoldChange"] < 0],
+            self.annotation.loc[self.results.index], ax)
+
+    def plot_tss_distance(self, fdr: float = 0.05, lfc: float = 0.0, ax=None):
+        rep = self.report(fdr=fdr, lfc=lfc)
+        return plots.plot_tss_distance(rep[rep["log2FoldChange"] > 0], rep[rep["log2FoldChange"] < 0], ax=ax)
 
     # ------------------------------------------------------------------ plots
     def plot_pca(self, color_by: str = "Condition", ax=None):

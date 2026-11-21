@@ -74,3 +74,41 @@ def plot_volcano(res: pd.DataFrame, fdr: float = 0.05, lfc: float = 0.0, ax=None
     ax.set_title(f"Volcano plot (FDR<{fdr}" + (f", |log2FC|>={lfc})" if lfc else ")"))
     ax.legend(markerscale=2, frameon=False, fontsize=8)
     return ax
+
+
+_FEATURE_COLORS = {"Promoter": "#d62728", "5UTR": "#ff7f0e", "3UTR": "#ffbb78", "UTR": "#f0a030",
+                   "Exon": "#2ca02c", "Intron": "#1f77b4", "Downstream": "#9467bd",
+                   "Intergenic": "#bdbdbd", "Unmatched_chrom": "#555555"}
+
+
+def plot_feature_distribution(up: pd.DataFrame, down: pd.DataFrame, all_tested: pd.DataFrame, ax=None):
+    """Stacked horizontal bars: % of regions per genomic feature for Up / Down / All tested."""
+    groups = {f"Up (n={len(up)})": up, f"Down (n={len(down)})": down,
+              f"All tested (n={len(all_tested)})": all_tested}
+    groups = {k: v for k, v in groups.items() if len(v)}
+    pct = pd.DataFrame({k: v["feature"].value_counts(normalize=True) * 100 for k, v in groups.items()}).fillna(0)
+    ax = ax or plt.subplots(figsize=(7, 2.8 + 0.2 * len(groups)))[1]
+    left = np.zeros(len(pct.columns))
+    for feat in [f for f in list(_FEATURE_COLORS) if f in pct.index]:
+        ax.barh(pct.columns, pct.loc[feat].to_numpy(), left=left, color=_FEATURE_COLORS[feat], label=feat)
+        left += pct.loc[feat].to_numpy()
+    ax.set_xlim(0, 100); ax.invert_yaxis()
+    ax.set_xlabel("% of regions (feature at region centre)")
+    ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", frameon=False, fontsize=8)
+    ax.set_title("Genomic feature distribution")
+    return ax
+
+
+def plot_tss_distance(up: pd.DataFrame, down: pd.DataFrame, window: int = 50000, bins: int = 50, ax=None):
+    """Histogram of distance to the nearest TSS (negative = upstream) for gained (red) and lost (blue)."""
+    ax = ax or plt.subplots(figsize=(5.5, 4))[1]
+    edges = np.linspace(-window, window, bins + 1)
+    for df, c, lab in [(up, "red", "Up"), (down, "royalblue", "Down")]:
+        if len(df):
+            d = df["distance_to_tss"].dropna()
+            ax.hist(d[d.abs() <= window], bins=edges, alpha=.6, color=c, label=f"{lab} (n={len(df)})")
+    ax.axvline(0, c="k", lw=.5)
+    ax.set_xlabel("Distance to nearest TSS (bp)"); ax.set_ylabel("Regions")
+    ax.set_title(f"Distance to TSS (within ±{window // 1000} kb)")
+    ax.legend(frameon=False)
+    return ax

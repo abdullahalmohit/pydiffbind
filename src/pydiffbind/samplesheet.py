@@ -20,7 +20,8 @@ def load_samplesheet(sheet: Union[str, pd.DataFrame], check_files: bool = True) 
     if isinstance(sheet, pd.DataFrame):
         df = sheet.copy()
     else:
-        df = pd.read_csv(sheet, sep=None, engine="python")  # auto-detect tab/comma/semicolon
+        sep = "\t" if str(sheet).endswith((".tsv", ".txt")) else ","
+        df = pd.read_csv(sheet, sep=sep)
 
     missing = [c for c in REQUIRED if c not in df.columns]
     if missing:
