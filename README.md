@@ -62,6 +62,10 @@ dba.plot_annotation(); dba.plot_tss_distance()
   marks (H3K27me3), where a domain spans several genes. `nearest_gene` is based on the nearest TSS.
 - `feature` is the genomic feature at the region centre: Promoter > 5UTR > 3UTR > Exon > Intron > Downstream > Intergenic.
 - Plant annotations often lack gene symbols: pass `symbols="id_to_symbol.tsv"` (two columns: gene_id, symbol).
+- **NCBI RefSeq `genomic.gtf`**: the symbol is in `gene_id` and the AT/Os locus in `locus_tag`. Use
+  `dba.annotate(gtf, id_attr="locus_tag")` (CLI: `--gtf-id-attr locus_tag`) to get IDs like `AT1G01010`;
+  symbols stay available as gene names. If your BAMs use `Chr1`-style names but the GTF uses accessions
+  (`NC_003070.9`), pass `chrom_map="map.tsv"` (two columns: `NC_003070.9<TAB>Chr1`).
 - `biotypes=["protein_coding"]` restricts to selected gene biotypes.
 - `distance_to_tss` is signed: negative = upstream of the TSS in the gene's orientation.
 

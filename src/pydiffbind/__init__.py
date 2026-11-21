@@ -4,5 +4,5 @@ from .annotate import Annotation
 from .samplesheet import load_samplesheet
 from .peaks import read_peaks, build_consensus, filter_blacklist
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 __all__ = ["DBA", "Annotation", "load_samplesheet", "read_peaks", "build_consensus", "filter_blacklist"]

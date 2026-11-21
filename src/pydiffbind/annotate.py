@@ -82,7 +82,15 @@ class Annotation:
     # ------------------------------------------------------------------ loading
     @classmethod
     def from_file(cls, path: str, symbols: Optional[str] = None,
-                  biotypes: Optional[Sequence[str]] = None) -> "Annotation":
+                  biotypes: Optional[Sequence[str]] = None, id_attr: Optional[str] = None,
+                  name_attr: Optional[str] = None, chrom_map: Optional[str] = None) -> "Annotation":
+        """Parse a GTF/GFF3 (plain or .gz).
+
+        id_attr   : attribute to use as the gene ID (e.g. 'locus_tag' for NCBI RefSeq to get AT1G01010
+                    instead of the symbol). Default: gene_id (GTF) / ID (GFF3).
+        name_attr : attribute to use as the gene name/symbol. Default: gene_name, gene or Name.
+        chrom_map : optional 2-column file (annotation_name<TAB>bam_name), e.g. NC_003070.9<TAB>Chr1.
+        """
         df = pd.read_csv(path, sep="\t", header=None, comment="#", names=_COLS,
                          usecols=[0, 2, 3, 4, 6, 8], dtype={"chrom": str, "attr": str},
                          quoting=3, compression="infer")
@@ -94,10 +102,16 @@ class Annotation:
         df["end"] = df["end"].astype(np.int64)
         df["strand"] = df["strand"].where(df["strand"].isin(["+", "-"]), "+")
 
-        genes, exons, utrs = (_parse_gtf if gtf else _parse_gff3)(df)
+        genes, exons, utrs = (_parse_gtf if gtf else _parse_gff3)(df, id_attr, name_attr)
         genes = genes.drop_duplicates("gene_id")
         genes["gene_name"] = genes["gene_name"].fillna(genes["gene_id"])
 
+        if chrom_map:
+            cm = pd.read_csv(chrom_map, sep=None, engine="python", header=None, usecols=[0, 1],
+                             names=["a", "b"], dtype=str)
+            cmap = dict(zip(cm["a"], cm["b"]))
+            for t in (genes, exons, utrs):
+                t["chrom"] = t["chrom"].map(lambda c: cmap.get(c, c))
         if symbols:
             m = pd.read_csv(symbols, sep=None, engine="python", header=None, usecols=[0, 1], names=["id", "sym"])
             m = m[~m["id"].astype(str).str.lower().isin(["gene_id", "gene", "id", "geneid"])]
@@ -211,10 +225,13 @@ class Annotation:
 
 
 # ---------------------------------------------------------------------- parsers
-def _parse_gtf(df: pd.DataFrame):
+def _parse_gtf(df: pd.DataFrame, id_attr=None, name_attr=None):
     a = df["attr"]
     rows = df[df["f"].isin({"gene", "exon"} | _UTR5 | _UTR3 | _UTR)].copy()
-    rows["gene_id"] = _attr(rows["attr"], "gene_id", True)
+    gid = _attr(rows["attr"], "gene_id", True)
+    if id_attr and id_attr != "gene_id":
+        gid = _attr(rows["attr"], id_attr, True).fillna(gid)
+    rows["gene_id"] = gid
     rows = rows.dropna(subset=["gene_id"])
 
     g = rows[rows["f"] == "gene"].copy()
@@ -226,7 +243,10 @@ def _parse_gtf(df: pd.DataFrame):
         agg["_attr"] = agg["gene_id"].map(first)
         g = agg
         g["attr"] = g["_attr"]
-    g["gene_name"] = _attr(g["attr"], "gene_name", True)
+    name = _attr(g["attr"], name_attr, True) if name_attr else pd.Series(np.nan, index=g.index, dtype=object)
+    for k in ["gene_name", "gene", "gene_symbol"]:
+        name = name.fillna(_attr(g["attr"], k, True))
+    g["gene_name"] = name
     bio = _attr(g["attr"], "gene_biotype", True)
     for k in ["gene_type", "biotype"]:
         bio = bio.fillna(_attr(g["attr"], k, True))
@@ -239,7 +259,7 @@ def _parse_gtf(df: pd.DataFrame):
     return genes, exons, u[["chrom", "start", "end", "gene_id", "kind"]]
 
 
-def _parse_gff3(df: pd.DataFrame):
+def _parse_gff3(df: pd.DataFrame, id_attr=None, name_attr=None):
     d = df[~df["f"].isin(_DROP)].copy()
     d["ID"] = _attr(d["attr"], "ID", False)
     d["Parent"] = _attr(d["attr"], "Parent", False)
@@ -250,8 +270,8 @@ def _parse_gff3(df: pd.DataFrame):
     g = d[is_gene].copy()
     g["gene_id"] = strip_g(g["ID"])
     g = g.dropna(subset=["gene_id"])
-    name = _attr(g["attr"], "Name", False)
-    for k in ["gene_name", "symbol"]:
+    name = _attr(g["attr"], name_attr, False) if name_attr else _attr(g["attr"], "Name", False)
+    for k in ["gene_name", "gene", "symbol"]:
         name = name.fillna(_attr(g["attr"], k, False))
     g["gene_name"] = name
     bio = _attr(g["attr"], "biotype", False)
@@ -280,4 +300,12 @@ def _parse_gff3(df: pd.DataFrame):
     ut["gene_id"] = to_gene(ut["Parent"].fillna(""))
     ut = ut.dropna(subset=["gene_id"])
     ut["kind"] = _utr_kind(ut["f"])
-    return genes, ex[["chrom", "start", "end", "gene_id"]], ut[["chrom", "start", "end", "gene_id", "kind"]]
+    ex, ut = ex[["chrom", "start", "end", "gene_id"]].copy(), ut[["chrom", "start", "end", "gene_id", "kind"]].copy()
+    if id_attr and id_attr != "ID":      # e.g. locus_tag: swap gene IDs everywhere
+        new = _attr(g["attr"], id_attr, False)
+        remap = dict(zip(g["gene_id"], new.fillna(g["gene_id"])))
+        genes = genes.copy()
+        genes["gene_id"] = genes["gene_id"].map(remap)
+        ex["gene_id"] = ex["gene_id"].map(remap).fillna(ex["gene_id"])
+        ut["gene_id"] = ut["gene_id"].map(remap).fillna(ut["gene_id"])
+    return genes, ex, ut

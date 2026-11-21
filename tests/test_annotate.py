@@ -66,3 +66,33 @@ def test_symbols_biotype_and_errors(tmp_path):
     assert list(a.genes["gene_name"]) == ["MYGENE"]
     with pytest.raises(ValueError):
         a.annotate(regions("scaffold_x"))
+
+
+NCBI_GTF = (
+    'NC_003070.9\tBestRefSeq\tgene\t10001\t14000\t.\t+\t.\tgene_id "NAC001"; transcript_id ""; db_xref "GeneID:1"; '
+    'gene "NAC001"; gene_biotype "protein_coding"; locus_tag "AT1G01010";\n'
+    'NC_003070.9\tBestRefSeq\texon\t10001\t14000\t.\t+\t.\tgene_id "NAC001"; transcript_id "NM_1"; gene "NAC001"; '
+    'locus_tag "AT1G01010";\n'
+)
+
+
+def test_ncbi_style_gtf_with_locus_tag_and_chrom_map(tmp_path):
+    p = tmp_path / "genomic.gtf"; p.write_text(NCBI_GTF)
+    cm = tmp_path / "map.tsv"; cm.write_text("NC_003070.9\tChr1\n")
+    a = Annotation.from_file(str(p), id_attr="locus_tag", chrom_map=str(cm))
+    assert list(a.genes["gene_id"]) == ["AT1G01010"] and list(a.genes["gene_name"]) == ["NAC001"]
+    r = a.annotate(regions("Chr1"), promoter=(-2000, 100))
+    assert r.loc["r0", "overlapping_genes"] == "AT1G01010" and r.loc["r0", "overlapping_gene_names"] == "NAC001"
+    # default (no id_attr) keeps the symbol as the ID
+    b = Annotation.from_file(str(p))
+    assert list(b.genes["gene_id"]) == ["NAC001"]
+
+
+def test_ncbi_gff3_locus_tag(tmp_path):
+    g = ("NC_003070.9\tRefSeq\tgene\t10001\t14000\t.\t+\t.\tID=gene-AT1G01010;Name=NAC001;locus_tag=AT1G01010\n"
+         "NC_003070.9\tRefSeq\tmRNA\t10001\t14000\t.\t+\t.\tID=rna-NM_1;Parent=gene-AT1G01010\n"
+         "NC_003070.9\tRefSeq\texon\t10001\t14000\t.\t+\t.\tID=exon-NM_1-1;Parent=rna-NM_1\n")
+    p = tmp_path / "genomic.gff"; p.write_text(g)
+    a = Annotation.from_file(str(p), id_attr="locus_tag")
+    assert list(a.genes["gene_id"]) == ["AT1G01010"] and len(a.exons) == 1
+    assert a.exons["gene_id"].iloc[0] == "AT1G01010"

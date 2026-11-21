@@ -32,6 +32,9 @@ def main(argv=None):
     p.add_argument("--promoter-down", type=int, default=500, help="promoter bp downstream of TSS")
     p.add_argument("--downstream", type=int, default=1000, help="bp after gene end labelled 'Downstream'")
     p.add_argument("--symbols", help="optional 2-column file: gene_id<TAB>symbol")
+    p.add_argument("--gtf-id-attr", help="GTF attribute for gene ID (NCBI RefSeq: locus_tag)")
+    p.add_argument("--gtf-name-attr", help="GTF attribute for gene symbol")
+    p.add_argument("--chrom-map", help="2-column file: annotation_chrom<TAB>bam_chrom")
     p.add_argument("--biotypes", nargs="*", help="keep only these gene biotypes, e.g. protein_coding")
     p.add_argument("--gene-lists-by", choices=["overlap", "nearest"], default="overlap")
     a = p.parse_args(argv)
@@ -49,7 +52,8 @@ def main(argv=None):
     dba.norm_counts.to_csv(f"{a.outdir}/normalized_counts.csv")
     if a.gtf:
         dba.annotate(a.gtf, promoter=(-a.promoter_up, a.promoter_down), downstream=a.downstream,
-                     symbols=a.symbols, biotypes=a.biotypes)
+                     symbols=a.symbols, biotypes=a.biotypes,
+                     id_attr=a.gtf_id_attr, name_attr=a.gtf_name_attr, chrom_map=a.chrom_map)
     dba.full_results().to_csv(f"{a.outdir}/all_results.csv")
     dba.report(fdr=a.fdr).to_csv(f"{a.outdir}/significant.csv")
     plot_list = [("pca", dba.plot_pca), ("correlation", dba.plot_correlation),

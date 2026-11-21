@@ -154,17 +154,21 @@ class DBA:
 
     # ------------------------------------------------------------- annotation
     def annotate(self, gtf: Union[str, Annotation], promoter=(-2000, 500), downstream: int = 1000,
-                 symbols: Optional[str] = None, biotypes: Optional[List[str]] = None) -> pd.DataFrame:
+                 symbols: Optional[str] = None, biotypes: Optional[List[str]] = None,
+                 id_attr: Optional[str] = None, name_attr: Optional[str] = None,
+                 chrom_map: Optional[str] = None) -> pd.DataFrame:
         """Annotate all consensus regions using a user-supplied GTF/GFF3 (any species).
 
         promoter : (upstream, downstream) of the TSS, e.g. (-2000, 500).
         symbols : optional 2-column file (gene_id, symbol), useful for plants.
         biotypes : optional filter, e.g. ["protein_coding"].
+        id_attr / name_attr : GTF attributes for gene ID / symbol (NCBI RefSeq: id_attr="locus_tag").
+        chrom_map : optional 2-column file mapping annotation chromosome names to BAM names.
         Adds genes, nearest gene, distance to TSS and feature type to ``report()``.
         """
         if self.consensus is None:
             raise RuntimeError("Run count() first.")
-        self._ann = gtf if isinstance(gtf, Annotation) else Annotation.from_file(gtf, symbols, biotypes)
+        self._ann = gtf if isinstance(gtf, Annotation) else Annotation.from_file(gtf, symbols, biotypes, id_attr, name_attr, chrom_map)
         self.annotation = self._ann.annotate(self.consensus, promoter=promoter, downstream=downstream)
         return self.annotation
 
