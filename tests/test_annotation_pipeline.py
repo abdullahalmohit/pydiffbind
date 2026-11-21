@@ -32,3 +32,31 @@ def test_annotated_pipeline(tmp_path):
     assert (tmp_path / "out" / "up_genes.txt").read_text().strip()
     import matplotlib; matplotlib.use("Agg")
     dba.plot_annotation(); dba.plot_tss_distance()
+
+
+def test_chipseeker_export(tmp_path):
+    sheet, centers, diff = simulate(str(tmp_path))
+    lines = []
+    for i, c in enumerate(centers):
+        st = "+-"[i % 2]
+        lines += [f'chr1\tsrc\tgene\t{c-800}\t{c+1200}\t.\t{st}\t.\tgene_id "AT1G{i:05d}";',
+                  f'chr1\tsrc\texon\t{c-800}\t{c-300}\t.\t{st}\t.\tgene_id "AT1G{i:05d}"; transcript_id "NM_{i}.1";',
+                  f'chr1\tsrc\texon\t{c+700}\t{c+1200}\t.\t{st}\t.\tgene_id "AT1G{i:05d}"; transcript_id "NM_{i}.1";']
+    gtf = tmp_path / "a.gtf"; gtf.write_text("\n".join(lines) + "\n")
+    dba = DBA(sheet)
+    dba.count(summits=250, fragment_size=150)
+    dba.normalize("rle"); dba.analyze("Condition", "treated", "control")
+    dba.annotate(str(gtf))
+    out = tmp_path / "annotated.tsv"
+    t = dba.export_chipseeker(str(out), fdr=0.05)
+    expected = ["seqnames", "start", "end", "width", "strand", "Conc", "Conc_treated", "Conc_control", "Fold",
+                "p.value", "FDR", "annotation", "geneChr", "geneStart", "geneEnd", "geneLength", "geneStrand",
+                "geneId", "transcriptId", "distanceToTSS", "TAIR"]
+    back = pd.read_csv(out, sep="\t")
+    assert list(back.columns) == expected and len(back) == len(t) >= 30
+    assert (back["width"] == back["end"] - back["start"] + 1).all() and (back["strand"] == "*").all()
+    assert back["FDR"].is_monotonic_increasing and (back["TAIR"] == back["geneId"]).all()
+    assert back["annotation"].str.contains(r"^(Promoter|Exon|Intron|Distal|5'|3'|Downstream)").all()
+    assert set(back["geneStrand"]) <= {1, 2}
+    assert dba._make_names("Amir-FIE") == "Amir.FIE"
+    assert set(dba.gene_lists(by="chipseeker")["up"]) <= set(back["geneId"]) | set(dba.annotation["geneId"])

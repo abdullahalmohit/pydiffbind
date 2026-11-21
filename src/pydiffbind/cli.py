@@ -36,7 +36,11 @@ def main(argv=None):
     p.add_argument("--gtf-name-attr", help="GTF attribute for gene symbol")
     p.add_argument("--chrom-map", help="2-column file: annotation_chrom<TAB>bam_chrom")
     p.add_argument("--biotypes", nargs="*", help="keep only these gene biotypes, e.g. protein_coding")
-    p.add_argument("--gene-lists-by", choices=["overlap", "nearest"], default="overlap")
+    p.add_argument("--gene-lists-by", choices=["overlap", "nearest", "chipseeker"], default="overlap")
+    p.add_argument("--tss-up", type=int, default=3000, help="ChIPseeker-style promoter window upstream of TSS")
+    p.add_argument("--tss-down", type=int, default=3000, help="ChIPseeker-style promoter window downstream of TSS")
+    p.add_argument("--cs-downstream", type=int, default=300, help="bp after transcript end labelled Downstream")
+    p.add_argument("--id-column", default="TAIR", help="name of the last ID column in the annotated table")
     a = p.parse_args(argv)
 
     os.makedirs(a.outdir, exist_ok=True)
@@ -53,13 +57,16 @@ def main(argv=None):
     if a.gtf:
         dba.annotate(a.gtf, promoter=(-a.promoter_up, a.promoter_down), downstream=a.downstream,
                      symbols=a.symbols, biotypes=a.biotypes,
-                     id_attr=a.gtf_id_attr, name_attr=a.gtf_name_attr, chrom_map=a.chrom_map)
+                     id_attr=a.gtf_id_attr, name_attr=a.gtf_name_attr, chrom_map=a.chrom_map,
+                     tss_region=(-a.tss_up, a.tss_down), cs_downstream=a.cs_downstream)
     dba.full_results().to_csv(f"{a.outdir}/all_results.csv")
     dba.report(fdr=a.fdr).to_csv(f"{a.outdir}/significant.csv")
     plot_list = [("pca", dba.plot_pca), ("correlation", dba.plot_correlation),
                  ("ma", dba.plot_ma), ("volcano", dba.plot_volcano)]
     if a.gtf:
         plot_list += [("feature_distribution", dba.plot_annotation), ("tss_distance", dba.plot_tss_distance)]
+        dba.export_chipseeker(f"{a.outdir}/annotated_significant.tsv", fdr=a.fdr, id_column=a.id_column)
+        dba.export_chipseeker(f"{a.outdir}/annotated_all_sites.tsv", only_significant=False, id_column=a.id_column)
         dba.save_gene_lists(a.outdir, fdr=a.fdr, by=a.gene_lists_by)
         dba.save_gene_lists(a.outdir, prefix="names_", fdr=a.fdr, by=a.gene_lists_by, names=True)
     for name, fn in plot_list:

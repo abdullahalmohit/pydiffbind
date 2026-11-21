@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import List, Optional, Union
 
+import numpy as np
 import pandas as pd
 
 from . import analyze, count as _count, normalize as _norm, peaks as _peaks, plots, samplesheet
@@ -156,7 +158,8 @@ class DBA:
     def annotate(self, gtf: Union[str, Annotation], promoter=(-2000, 500), downstream: int = 1000,
                  symbols: Optional[str] = None, biotypes: Optional[List[str]] = None,
                  id_attr: Optional[str] = None, name_attr: Optional[str] = None,
-                 chrom_map: Optional[str] = None) -> pd.DataFrame:
+                 chrom_map: Optional[str] = None, tss_region=(-3000, 3000),
+                 cs_downstream: int = 300) -> pd.DataFrame:
         """Annotate all consensus regions using a user-supplied GTF/GFF3 (any species).
 
         promoter : (upstream, downstream) of the TSS, e.g. (-2000, 500).
@@ -164,12 +167,17 @@ class DBA:
         biotypes : optional filter, e.g. ["protein_coding"].
         id_attr / name_attr : GTF attributes for gene ID / symbol (NCBI RefSeq: id_attr="locus_tag").
         chrom_map : optional 2-column file mapping annotation chromosome names to BAM names.
+        tss_region, cs_downstream : settings for the ChIPseeker-style transcript-level annotation
+        (labels like 'Promoter (<=1kb)', 'Exon (NM_1/AT1G01010, exon 2 of 5)'), used by
+        :meth:`chipseeker_table` / :meth:`export_chipseeker`.
         Adds genes, nearest gene, distance to TSS and feature type to ``report()``.
         """
         if self.consensus is None:
             raise RuntimeError("Run count() first.")
         self._ann = gtf if isinstance(gtf, Annotation) else Annotation.from_file(gtf, symbols, biotypes, id_attr, name_attr, chrom_map)
-        self.annotation = self._ann.annotate(self.consensus, promoter=promoter, downstream=downstream)
+        gene_level = self._ann.annotate(self.consensus, promoter=promoter, downstream=downstream)
+        cs = self._ann.annotate_chipseeker(self.consensus, tss_region=tss_region, downstream=cs_downstream)
+        self.annotation = gene_level.join(cs)
         return self.annotation
 
     def full_results(self) -> pd.DataFrame:
@@ -191,8 +199,10 @@ class DBA:
     def _gene_col(self, by: str, names: bool) -> str:
         if self.annotation is None:
             raise RuntimeError("Run annotate(gtf=...) first.")
-        if by not in ("overlap", "nearest"):
-            raise ValueError("by must be 'overlap' or 'nearest'")
+        if by not in ("overlap", "nearest", "chipseeker"):
+            raise ValueError("by must be 'overlap', 'nearest' or 'chipseeker'")
+        if by == "chipseeker":
+            return "geneId"
         return {("overlap", False): "overlapping_genes", ("overlap", True): "overlapping_gene_names",
                 ("nearest", False): "nearest_gene", ("nearest", True): "nearest_gene_name"}[(by, bool(names))]
 
@@ -201,7 +211,8 @@ class DBA:
         """Gene lists for enrichment: {'up': [...], 'down': [...], 'all': [...]}.
 
         by='overlap' (default; best for broad marks like H3K27me3) uses every gene whose body or
-        promoter overlaps a differential region; by='nearest' uses the nearest TSS only.
+        promoter overlaps a differential region; by='nearest' uses the nearest gene TSS only;
+        by='chipseeker' uses the geneId of the ChIPseeker-style table (nearest transcript TSS).
         names=True returns symbols instead of gene IDs.
         """
         col = self._gene_col(by, names)
@@ -238,6 +249,50 @@ class DBA:
     def plot_tss_distance(self, fdr: float = 0.05, lfc: float = 0.0, ax=None):
         rep = self.report(fdr=fdr, lfc=lfc)
         return plots.plot_tss_distance(rep[rep["log2FoldChange"] > 0], rep[rep["log2FoldChange"] < 0], ax=ax)
+
+    # ---------------------------------------------- ChIPseeker-style output table
+    @staticmethod
+    def _make_names(x: str) -> str:
+        """R-style make.names: 'Amir-FIE' -> 'Amir.FIE'."""
+        x = re.sub(r"[^A-Za-z0-9._]", ".", str(x))
+        return ("X" + x) if re.match(r"^(\d|_|\.\d)", x) else x
+
+    def chipseeker_table(self, fdr: float = 0.05, lfc: float = 0.0, only_significant: bool = True,
+                         id_column: str = "TAIR") -> pd.DataFrame:
+        """Annotated differential sites in the DiffBind + ChIPseeker column layout:
+
+        seqnames start end width strand Conc Conc_<g1> Conc_<g2> Fold p.value FDR annotation geneChr
+        geneStart geneEnd geneLength geneStrand geneId transcriptId distanceToTSS <id_column>
+
+        start is 1-based; Conc* = log2(mean normalized count + 1); Fold = DESeq2 log2 fold change
+        (group1 / group2); strand is '*'; geneStrand 1 = '+', 2 = '-'.
+        """
+        r = self.full_results()
+        if "geneId" not in r.columns:
+            raise RuntimeError("Run annotate(gtf=...) first.")
+        g1, g2 = self.contrast[1], self.contrast[2]
+        if only_significant:
+            r = r[(r["padj"] < fdr) & (r["log2FoldChange"].abs() >= lfc)]
+        r = r.sort_values(["padj", "pvalue"], na_position="last")
+        n1, n2 = self._make_names(g1), self._make_names(g2)
+        t = pd.DataFrame({
+            "seqnames": r["Chromosome"], "start": r["Start"] + 1, "end": r["End"],
+            "width": r["End"] - r["Start"], "strand": "*",
+            "Conc": np.log2(r["baseMean"] + 1),
+            f"Conc_{n1}": np.log2(r[f"Conc_{g1}"] + 1), f"Conc_{n2}": np.log2(r[f"Conc_{g2}"] + 1),
+            "Fold": r["log2FoldChange"], "p.value": r["pvalue"], "FDR": r["padj"],
+            "annotation": r["annotation"], "geneChr": r["geneChr"], "geneStart": r["geneStart"],
+            "geneEnd": r["geneEnd"], "geneLength": r["geneLength"], "geneStrand": r["geneStrand"],
+            "geneId": r["geneId"], "transcriptId": r["transcriptId"], "distanceToTSS": r["distanceToTSS"],
+            id_column: r["geneId"],
+        })
+        return t.reset_index(drop=True)
+
+    def export_chipseeker(self, path: str, **kw) -> pd.DataFrame:
+        """Write :meth:`chipseeker_table` as a tab-separated file (NA for missing values)."""
+        t = self.chipseeker_table(**kw)
+        t.to_csv(path, sep="\t", index=False, na_rep="NA")
+        return t
 
     # ------------------------------------------------------------------ plots
     def plot_pca(self, color_by: str = "Condition", ax=None):

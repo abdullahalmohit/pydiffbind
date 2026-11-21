@@ -69,6 +69,30 @@ dba.plot_annotation(); dba.plot_tss_distance()
 - `biotypes=["protein_coding"]` restricts to selected gene biotypes.
 - `distance_to_tss` is signed: negative = upstream of the TSS in the gene's orientation.
 
+## ChIPseeker-style annotated table
+
+`dba.annotate()` also builds a transcript-level, ChIPseeker-style annotation, and the results can be written in
+the DiffBind + ChIPseeker column layout:
+
+```python
+dba.export_chipseeker("annotated_significant.tsv", fdr=0.05)                   # significant sites
+dba.export_chipseeker("annotated_all.tsv", only_significant=False)             # every tested site
+```
+
+Columns: `seqnames start end width strand Conc Conc_<g1> Conc_<g2> Fold p.value FDR annotation geneChr geneStart
+geneEnd geneLength geneStrand geneId transcriptId distanceToTSS TAIR` (last column name via `id_column=`).
+
+- `start` is 1-based; `Conc*` = log2(mean normalized count + 1); `Fold` = DESeq2 log2 fold change (group1/group2).
+- `annotation` labels: `Promoter (<=1kb)`, `Promoter (1-2kb)`, `5' UTR`, `3' UTR`, `Exon (tx/gene, exon 3 of 7)`,
+  `Intron (tx/gene, intron 2 of 6)`, `Downstream (<=300bp)`, `Distal Intergenic` (priority in that order).
+- The nearest transcript TSS defines `geneId`, `transcriptId`, `geneStart/End`, `geneStrand` (1 = +, 2 = -) and
+  `distanceToTSS` (to the nearest region edge; negative = upstream; 0 if the TSS lies inside the region).
+- Whole-region overlap is used (not just the centre). UTRs come from `five_prime_utr`/`three_prime_utr`
+  records or, when absent (e.g. NCBI GTF), are inferred from CDS. Missing transcript IDs are reported as `NA`.
+- Settings: `annotate(..., tss_region=(-3000, 3000), cs_downstream=300)`.
+- CLI writes `annotated_significant.tsv` and `annotated_all_sites.tsv` when `--gtf` is given
+  (`--tss-up`, `--tss-down`, `--cs-downstream`, `--id-column`). Gene lists from the same IDs: `--gene-lists-by chipseeker`.
+
 ## Command line
 
 ```bash
